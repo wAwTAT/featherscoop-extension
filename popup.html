@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="color-scheme" content="light dark" />
+  <title>FeatherScoop</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 48 48">
+          <defs>
+            <linearGradient id="logoGradient" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#2563eb" />
+              <stop offset="1" stop-color="#14b8a6" />
+            </linearGradient>
+          </defs>
+          <rect width="48" height="48" rx="12" fill="url(#logoGradient)" />
+          <g transform="rotate(45 26.5 23.5)">
+            <ellipse cx="26.5" cy="23.5" rx="8.5" ry="17.5" fill="#ffffff" fill-opacity="0.96" />
+          </g>
+          <line x1="14" y1="36" x2="39" y2="11" stroke="#1e3a8a" stroke-width="1.8" stroke-linecap="round" opacity="0.28" />
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>FeatherScoop</h1>
+        <p>飞书文档附件 / 正文导出</p>
+      </div>
+    </div>
+    <button id="rescanBtn" class="icon-btn" type="button" title="重新扫描页面">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+        <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </button>
+  </header>
+
+  <main>
+    <section id="stateCard" class="state-card" data-kind="loading">
+      <div class="state-title" id="stateTitle">正在扫描页面…</div>
+      <div class="state-detail" id="stateDetail">读取文档中的附件清单</div>
+    </section>
+
+    <section id="docCard" class="doc-card" hidden>
+      <div class="doc-head">
+        <div class="doc-title" id="docTitle"></div>
+        <button id="exportDocBtn" class="ghost-btn" type="button" title="将文档正文导出为 Markdown（含图片）">
+          导出文档
+        </button>
+      </div>
+      <div class="doc-meta">
+        <span id="fileCount" class="meta-strong"></span>
+        <span class="meta-dot">·</span>
+        <span id="docHost"></span>
+      </div>
+    </section>
+
+    <section id="listSection" class="list-section" hidden>
+      <div class="list-head">
+        <label class="check-all">
+          <input type="checkbox" id="selectAll" checked />
+          <span>全选</span>
+        </label>
+        <span id="listMeta" class="list-meta"></span>
+      </div>
+      <ul id="fileList" class="file-list"></ul>
+    </section>
+
+    <details id="settings" class="settings">
+      <summary>下载设置</summary>
+      <div class="setting-item">
+        <label for="rootDir">保存目录</label>
+        <input id="rootDir" type="text" autocomplete="off" spellcheck="false" placeholder="FeatherScoop" />
+      </div>
+      <p class="setting-hint">相对于浏览器的默认下载目录，例如 FeatherScoop 或 飞书附件/2026</p>
+      <div class="setting-item">
+        <span>按「【资料】」前缀分组</span>
+        <label class="switch">
+          <input type="checkbox" id="groupByPrefix" />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="setting-item">
+        <span>跳过已下载且大小一致的文件</span>
+        <label class="switch">
+          <input type="checkbox" id="skipExisting" />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="setting-item">
+        <span>下载完成后生成 README 索引</span>
+        <label class="switch">
+          <input type="checkbox" id="makeIndex" />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+    </details>
+
+    <div id="progressWrap" class="progress-wrap" hidden>
+      <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+      <div id="progressText" class="progress-text"></div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="footer-left">
+      <span id="selectedCount">已选 0 项</span>
+      <button id="openFolderBtn" class="link-btn" type="button" hidden>打开文件夹</button>
+    </div>
+    <button id="downloadBtn" class="primary-btn" type="button" disabled>下载</button>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
