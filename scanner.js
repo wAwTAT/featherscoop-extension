@@ -10,6 +10,17 @@ export function scanInPage(rootOverride) {
   const blockMaps = [];
   const seen = new Set();
 
+  // 单页跳转后 window.DATA 仍是旧文档；refreshSsrInPage 会把当前文档的数据放在这里
+  let fresh = null;
+  try {
+    const cache = win.__featherscoopSsrCache;
+    if (cache && cache.blockMap && cache.url === (win.location && win.location.href)) {
+      fresh = cache;
+    }
+  } catch (err) {
+    fresh = null;
+  }
+
   function walk(start) {
     const stack = [{ value: start, depth: 0 }];
     while (stack.length) {
@@ -50,26 +61,30 @@ export function scanInPage(rootOverride) {
     }
   }
 
-  const roots = [];
-  if (rootOverride) {
-    roots.push(rootOverride);
+  if (fresh) {
+    blockMaps.push(fresh.blockMap);
   } else {
-    const candidates = ["DATA", "__INITIAL_STATE__", "__PRELOADED_STATE__", "__SSR_DATA__", "SSR_DATA"];
-    for (let i = 0; i < candidates.length; i += 1) {
+    const roots = [];
+    if (rootOverride) {
+      roots.push(rootOverride);
+    } else {
+      const candidates = ["DATA", "__INITIAL_STATE__", "__PRELOADED_STATE__", "__SSR_DATA__", "SSR_DATA"];
+      for (let i = 0; i < candidates.length; i += 1) {
+        try {
+          const candidate = win[candidates[i]];
+          if (candidate && typeof candidate === "object") roots.push(candidate);
+        } catch (err) {
+          // 跨域属性或 getter 抛错时忽略
+        }
+      }
       try {
-        const candidate = win[candidates[i]];
-        if (candidate && typeof candidate === "object") roots.push(candidate);
+        if (win.DATA && win.DATA.clientVars) roots.push(win.DATA.clientVars);
       } catch (err) {
-        // 跨域属性或 getter 抛错时忽略
+        // ignore
       }
     }
-    try {
-      if (win.DATA && win.DATA.clientVars) roots.push(win.DATA.clientVars);
-    } catch (err) {
-      // ignore
-    }
+    for (const root of roots) walk(root);
   }
-  for (const root of roots) walk(root);
 
   const files = [];
   const tokens = new Set();
@@ -141,8 +156,12 @@ export function scanInPage(rootOverride) {
     pageUrl = "";
   }
   try {
-    if (win.DATA && win.DATA.clientVars && win.DATA.clientVars.data) {
-      docTitle = win.DATA.clientVars.data.title || "";
+    if (fresh && fresh.title) {
+      docTitle = fresh.title;
+    } else if (win.DATA) {
+      const meta = win.DATA.meta || {};
+      const data = (win.DATA.clientVars && win.DATA.clientVars.data) || {};
+      docTitle = meta.title || data.title || "";
     }
   } catch (err) {
     docTitle = "";

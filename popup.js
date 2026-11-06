@@ -1,6 +1,7 @@
 // popup.js — 弹窗主逻辑：扫描页面 → 展示附件 → 调用 downloads API 下载
 
 import { scanInPage } from "./scanner.js";
+import { refreshSsrInPage } from "./ssr.js";
 import { renderBlocksToMarkdown, renderSsrBlocksToMarkdown, startDocFetch } from "./doc_export.js";
 import {
   DEFAULT_SETTINGS,
@@ -166,6 +167,19 @@ async function scan() {
     }
 
     state.tabId = tab.id;
+
+    // 飞书 wiki 是单页跳转，先确认页面里的 SSR 数据属于当前文档
+    const freshState = await ensureFreshSsr(tab.id);
+    if (freshState && freshState.stale && freshState.ok === false) {
+      showState(
+        "error",
+        "文档已切换，需要刷新",
+        "当前页面仍保留上一篇文档的数据，重新读取失败：" +
+          (freshState.error || "未知错误") +
+          "。请刷新当前文档后重试。"
+      );
+      return;
+    }
 
     const injected = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
@@ -510,6 +524,20 @@ async function startDownload() {
 
 /* ---------------- 文档正文导出 ---------------- */
 
+/** 让页面准备当前 URL 对应的 SSR 数据；返回 { ok, stale, error } */
+async function ensureFreshSsr(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: refreshSsrInPage,
+    });
+    return results && results[0] ? results[0].result : null;
+  } catch (err) {
+    return null;
+  }
+}
+
 async function exportDocument() {
   if (state.exporting || state.running || state.scanning || !state.tabId) return;
   state.exporting = true;
@@ -522,6 +550,11 @@ async function exportDocument() {
     "featherscoop-export-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
   try {
+    const freshState = await ensureFreshSsr(tabId);
+    if (freshState && freshState.stale && freshState.ok === false) {
+      throw new Error("页面内容已切换，请刷新当前文档后重试");
+    }
+
     await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",

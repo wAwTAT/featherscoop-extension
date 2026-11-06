@@ -83,8 +83,35 @@ export function startDocFetch(config) {
         }
       }
 
+      // 单页跳转后 window.DATA 仍是旧文档；refreshSsrInPage 会缓存当前 URL 的正文
+      let fresh = null;
+      try {
+        const cache = window.__featherscoopSsrCache;
+        if (cache && cache.blockMap && cache.url === String(location.href || "")) fresh = cache;
+      } catch (err) {
+        fresh = null;
+      }
+      if (fresh) {
+        write({
+          status: "done",
+          source: "ssr",
+          title: fresh.title || title,
+          blockMap: fresh.blockMap,
+          blockSequence: fresh.blockSequence,
+          pageUrl: String(location.href || ""),
+        });
+        return;
+      }
+
       // 首选：页面 SSR 数据。只读分享文档可能没有 API 权限，但页面本身一定能读到正文
       if (cvData && cvData.block_map) {
+        let stale = false;
+        try {
+          stale = Boolean(window.__featherscoopSsrStale);
+        } catch (err) {
+          stale = false;
+        }
+        if (stale) throw new Error("页面内容已切换，请刷新当前文档后重试");
         const map = cvData.block_map;
         const keys = Object.keys(map);
         if (keys.length > 0) {
