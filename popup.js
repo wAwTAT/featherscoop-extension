@@ -1,7 +1,7 @@
 // popup.js — 弹窗主逻辑：扫描页面 → 展示附件 → 调用 downloads API 下载
 
 import { scanInPage } from "./scanner.js";
-import { refreshSsrInPage } from "./ssr.js";
+import { refreshSsrInPage, readRefreshState } from "./ssr.js";
 import { renderBlocksToMarkdown, renderSsrBlocksToMarkdown, startDocFetch } from "./doc_export.js";
 import {
   DEFAULT_SETTINGS,
@@ -526,16 +526,44 @@ async function startDownload() {
 
 /** 让页面准备当前 URL 对应的 SSR 数据；返回 { ok, stale, error } */
 async function ensureFreshSsr(tabId) {
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
       func: refreshSsrInPage,
+      args: [{ id }],
     });
-    return results && results[0] ? results[0].result : null;
+    const direct = results && results[0] ? results[0].result : null;
+    if (direct && typeof direct === "object" && direct.ok !== undefined) return direct;
   } catch (err) {
     return null;
   }
+
+  // executeScript 未等待异步返回值时，轮询页面里写入的结果
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    await sleep(300);
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: readRefreshState,
+      });
+      const raw = results && results[0] ? results[0].result : null;
+      if (!raw) continue;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        parsed = null;
+      }
+      if (parsed && parsed.id === id && parsed.state) return parsed.state;
+    } catch (err) {
+      // ignore
+    }
+  }
+  return null;
 }
 
 async function exportDocument() {

@@ -4,10 +4,22 @@
 // 这里在页面内检测 window.DATA 是否与当前 URL 对应；不一致时重新请求当前页面 HTML，
 // 解析其中内联的 clientVars（block_map）并缓存到 window.__featherscoopSsrCache。
 
-export function refreshSsrInPage() {
+export function refreshSsrInPage(config) {
   const CACHE_KEY = "__featherscoopSsrCache";
   const STALE_KEY = "__featherscoopSsrStale";
+  const RESULT_KEY = "__featherscoopRefreshResult";
   const CACHE_TTL = 15000;
+  const requestId = (config && config.id) || "";
+
+  // 同时写入全局变量，供弹窗轮询读取（executeScript 不等待异步返回值时使用）
+  function store(result) {
+    try {
+      window[RESULT_KEY] = JSON.stringify({ id: requestId, state: result });
+    } catch (err) {
+      // ignore
+    }
+    return result;
+  }
 
   function normalize(value) {
     return String(value == null ? "" : value)
@@ -165,11 +177,11 @@ export function refreshSsrInPage() {
       cache = null;
     }
     if (cache && cache.url === current && Date.now() - cache.ts < CACHE_TTL) {
-      return { ok: true, stale: false, cached: true, title: cache.title };
+      return store({ ok: true, stale: false, cached: true, title: cache.title });
     }
 
     if (looksCurrent()) {
-      return { ok: true, stale: false, cached: false };
+      return store({ ok: true, stale: false, cached: false });
     }
 
     try {
@@ -196,18 +208,27 @@ export function refreshSsrInPage() {
       } catch (err) {
         // 页面禁止写入时忽略
       }
-      return { ok: true, stale: true, refreshed: true, title: fresh.title };
+      return store({ ok: true, stale: true, refreshed: true, title: fresh.title });
     } catch (err) {
       try {
         window[STALE_KEY] = true;
       } catch (e) {
         // ignore
       }
-      return {
+      return store({
         ok: false,
         stale: true,
         error: String(err && err.message ? err.message : err),
-      };
+      });
     }
   })();
+}
+
+/** 读取 refreshSsrInPage 写入页面的结果（同步函数，供 executeScript 轮询） */
+export function readRefreshState() {
+  try {
+    return window.__featherscoopRefreshResult || null;
+  } catch (err) {
+    return null;
+  }
 }
