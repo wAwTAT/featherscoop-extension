@@ -539,7 +539,14 @@ export function startDocFetch(config) {
         try {
           const step = Math.max(240, Math.floor((scroller.clientHeight || 600) * 0.8));
           const max = scroller.scrollHeight || 0;
-          for (let y = 0; y <= max && steps < 40; y += step) {
+          for (let y = 0; y <= max && steps < 60; y += step) {
+            scroller.scrollTop = y;
+            steps += 1;
+            await sleep(150);
+            snapshot();
+          }
+          // 再自下而上补一遍，覆盖懒渲染的尾部行
+          for (let y = max; y >= 0 && steps < 80; y -= step) {
             scroller.scrollTop = y;
             steps += 1;
             await sleep(120);
@@ -555,43 +562,52 @@ export function startDocFetch(config) {
         }
 
         // 不要过滤空行，保持行号与表格 rows_id 一一对应
-        return nodes.map(function (node) {
-          return { rows: node.rows, el: node.el };
-        });
+        return {
+          list: nodes.map(function (node) {
+            return { rows: node.rows, el: node.el };
+          }),
+          scroller: scroller,
+        };
       }
 
-      // 抽取某个元素之后的兄弟节点文本，用于补全 SSR 截断的后续正文
-      function textAfterElement(startEl) {
-        const BLOCKED = { NAV: 1, ASIDE: 1, HEADER: 1, FOOTER: 1 };
-        const parts = [];
-        let cur = startEl;
-        let level = 0;
+      // 抽取表格之后的正文：用 Range 截取，保留块级换行
+      function textAfterElement(startEl, root) {
+        const endRoot = root || document.body;
+        let fragment = null;
         try {
-          while (cur && cur !== document.body && level < 6) {
-            let sib = cur.nextElementSibling;
-            while (sib) {
-              if (!BLOCKED[sib.tagName]) {
-                const text = String(sib.innerText || "")
-                  .replace(/[\u200b\u200c\u200d\ufeff]/g, "")
-                  .replace(/[ \t]+\n/g, "\n")
-                  .replace(/\n{3,}/g, "\n\n")
-                  .trim();
-                if (text) parts.push(text);
-              }
-              sib = sib.nextElementSibling;
-            }
-            cur = cur.parentElement;
-            level += 1;
-          }
+          const range = document.createRange();
+          range.setStartAfter(startEl);
+          if (endRoot.lastChild) range.setEndAfter(endRoot.lastChild);
+          else range.setEndAfter(endRoot);
+          fragment = range.cloneContents();
         } catch (err) {
-          // ignore
+          return "";
         }
-        return parts.join("\n\n").trim().slice(0, 20000);
+        if (!fragment) return "";
+        let holder = null;
+        try {
+          holder = document.createElement("div");
+          holder.setAttribute("style", "position:absolute;left:-99999px;top:0;width:800px;");
+          holder.appendChild(fragment);
+          document.body.appendChild(holder);
+          const text = String(holder.innerText || "")
+            .replace(/[\u200b\u200c\u200d\ufeff]/g, "")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+          return text.slice(0, 20000);
+        } catch (err) {
+          return "";
+        } finally {
+          if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+        }
       }
 
       // 最后兜底：分页数据既没取到也没拦截到时，从页面已渲染的表格 DOM 补全
       async function fillFromDom(map, overrides) {
-        const items = await collectDomTables();
+        const collected = await collectDomTables();
+        const items = collected.list || [];
+        const scrollerEl = collected.scroller || null;
         const domTables = items.map(function (item) {
           return item.rows;
         });
@@ -650,7 +666,7 @@ export function startDocFetch(config) {
             }
           }
         }
-        return { filled: filled, tail: tailEl ? textAfterElement(tailEl) : "" };
+        return { filled: filled, tail: tailEl ? textAfterElement(tailEl, scrollerEl) : "" };
       }
 
       // 收集拦截器状态，便于排查取数失败的原因
