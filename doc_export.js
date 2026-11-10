@@ -216,25 +216,72 @@ export function startDocFetch(config) {
         return { cached: cachedAdded, paged: added, api: apiState };
       }
 
-      // 统计仍然缺失的表格单元格，用于提示导出是否完整
-      function countMissingCells(map) {
-        let missing = 0;
+      // 读取单元格文本；block 或文字缺失都算不完整
+      function cellTextOf(map, cellId) {
+        const cell = map[cellId];
+        const children = (cell && cell.data && cell.data.children) || [];
+        let out = "";
+        for (let i = 0; i < children.length; i += 1) {
+          const block = map[children[i]];
+          const data = (block && block.data) || {};
+          if (typeof data.text === "string") {
+            out += data.text;
+            continue;
+          }
+          const holder = data.text && data.text.initialAttributedTexts;
+          if (!holder || !holder.text) continue;
+          const segments = holder.text;
+          if (typeof segments === "string") {
+            out += segments;
+          } else if (segments && typeof segments === "object") {
+            const keys = Object.keys(segments);
+            for (let k = 0; k < keys.length; k += 1) {
+              const value = segments[keys[k]];
+              if (value != null) out += String(value);
+            }
+          }
+        }
+        return out.trim();
+      }
+
+      // 统计表格单元格的结构完整性：单元格 block 或它的子块缺失才算不完整
+      // （真正空白的单元格不算，避免误报）
+      function tableStats(map, overrides) {
+        const ov = overrides || {};
+        let tables = 0;
+        let cells = 0;
+        let incomplete = 0;
         const ids = Object.keys(map);
         for (let i = 0; i < ids.length; i += 1) {
           const data = (map[ids[i]] && map[ids[i]].data) || {};
           if (data.type !== "table") continue;
-          const cells = data.cell_set || {};
-          const keys = Object.keys(cells);
+          tables += 1;
+          const cellSet = data.cell_set || {};
+          const keys = Object.keys(cellSet);
           for (let j = 0; j < keys.length; j += 1) {
-            const cell = cells[keys[j]];
-            if (cell && cell.block_id && !map[cell.block_id]) missing += 1;
+            const cell = cellSet[keys[j]];
+            if (!cell || !cell.block_id) continue;
+            cells += 1;
+            if (ov[cell.block_id]) continue;
+            const cellBlock = map[cell.block_id];
+            if (!cellBlock) {
+              incomplete += 1;
+              continue;
+            }
+            const children = (cellBlock.data && cellBlock.data.children) || [];
+            for (let k = 0; k < children.length; k += 1) {
+              if (!map[children[k]]) {
+                incomplete += 1;
+                break;
+              }
+            }
           }
         }
-        return missing;
+        return { tables: tables, cells: cells, incomplete: incomplete };
       }
 
       // 最后兜底：分页数据既没取到也没拦截到时，从页面已渲染的表格 DOM 补全
-      function fillFromDom(map) {
+      function fillFromDom(map, overrides) {
         let domTables = [];
         try {
           const nodes = document.querySelectorAll("table");
@@ -283,22 +330,11 @@ export function startDocFetch(config) {
           for (let r = 0; r < rows.length && r < dom.length; r += 1) {
             for (let c = 0; c < cols.length && c < dom[r].length; c += 1) {
               const cell = cellSet[rows[r] + cols[c]];
-              if (!cell || !cell.block_id || map[cell.block_id]) continue;
+              if (!cell || !cell.block_id) continue;
+              if (cellTextOf(map, cell.block_id) || overrides[cell.block_id]) continue;
               const text = dom[r][c];
               if (!text) continue;
-              const textId = "dom_" + cell.block_id;
-              map[cell.block_id] = {
-                id: cell.block_id,
-                data: { type: "table_cell", parent_id: ids[i], children: [textId] },
-              };
-              map[textId] = {
-                id: textId,
-                data: {
-                  type: "text",
-                  parent_id: cell.block_id,
-                  text: { initialAttributedTexts: { text: { 0: text } } },
-                },
-              };
+              overrides[cell.block_id] = text;
               filled += 1;
             }
           }
@@ -320,36 +356,44 @@ export function startDocFetch(config) {
         return out;
       }
 
+      // 统一补全流程：分页数据 → DOM，返回 { incomplete, diag, overrides }
+      async function completeBlocks(map, seq, sourceCv) {
+        const overrides = {};
+        let diag = null;
+        let stats = tableStats(map, overrides);
+        const needMore = Boolean(sourceCv && sourceCv.has_more) || stats.incomplete > 0;
+        if (needMore) {
+          try {
+            diag = await fillRemaining(sourceCv, map, seq);
+          } catch (err) {
+            diag = { cached: 0, paged: 0, api: "error" };
+          }
+          stats = tableStats(map, overrides);
+          const domFilled = fillFromDom(map, overrides);
+          if (diag) diag.dom = domFilled;
+          stats = tableStats(map, overrides);
+        }
+        if (diag) diag.stats = stats;
+        return { incomplete: stats.incomplete, diag: diag, overrides: overrides };
+      }
+
       if (fresh) {
         const map = fresh.blockMap;
         const seq = fresh.blockSequence || Object.keys(map);
-        let incomplete = 0;
-        let diag = null;
-        if (fresh.hasMore) {
-          try {
-            diag = await fillRemaining(
-              { next_cursors: fresh.nextCursors || [], obj_token: fresh.objToken || "" },
-              map,
-              seq
-            );
-            incomplete = countMissingCells(map);
-            if (incomplete > 0) {
-              const domFilled = fillFromDom(map);
-              diag.dom = domFilled;
-              incomplete = countMissingCells(map);
-            }
-          } catch (err) {
-            incomplete = 1;
-          }
-        }
+        const done = await completeBlocks(map, seq, {
+          has_more: fresh.hasMore,
+          next_cursors: fresh.nextCursors || [],
+          obj_token: fresh.objToken || "",
+        });
         write({
           status: "done",
           source: "ssr",
           title: fresh.title || title,
           blockMap: map,
           blockSequence: seq,
-          incomplete: incomplete,
-          diag: withCacheDiag(diag),
+          overrides: done.overrides,
+          incomplete: done.incomplete,
+          diag: withCacheDiag(done.diag),
           pageUrl: String(location.href || ""),
         });
         return;
@@ -368,29 +412,16 @@ export function startDocFetch(config) {
         const keys = Object.keys(map);
         if (keys.length > 0) {
           const seq = Array.isArray(cvData.block_sequence) ? cvData.block_sequence.slice() : keys;
-          let incomplete = 0;
-          let diag = null;
-          if (cvData.has_more) {
-            try {
-              diag = await fillRemaining(cvData, map, seq);
-              incomplete = countMissingCells(map);
-              if (incomplete > 0) {
-                const domFilled = fillFromDom(map);
-                diag.dom = domFilled;
-                incomplete = countMissingCells(map);
-              }
-            } catch (err) {
-              incomplete = 1;
-            }
-          }
+          const done = await completeBlocks(map, seq, cvData);
           write({
             status: "done",
             source: "ssr",
             title: title,
             blockMap: map,
             blockSequence: seq,
-            incomplete: incomplete,
-            diag: withCacheDiag(diag),
+            overrides: done.overrides,
+            incomplete: done.incomplete,
+            diag: withCacheDiag(done.diag),
             pageUrl: String(location.href || ""),
           });
           return;
@@ -635,6 +666,7 @@ export function renderSsrBlocksToMarkdown(payload, options) {
   const opts = options || {};
   const grouping = opts.grouping !== false;
   const blockMap = (payload && payload.blockMap) || {};
+  const overrides = (payload && payload.overrides) || {};
   const sequence = Array.isArray(payload && payload.blockSequence)
     ? payload.blockSequence
     : Object.keys(blockMap);
@@ -694,6 +726,7 @@ export function renderSsrBlocksToMarkdown(payload, options) {
           const piece = renderBlock(child, true);
           if (piece) content += (content ? " " : "") + piece;
         }
+        if (!content && overrides[cell.block_id]) content = overrides[cell.block_id];
         return content.replace(/\n+/g, " ").trim().replace(/\|/g, "\\|");
       });
     });
