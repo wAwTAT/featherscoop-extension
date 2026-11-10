@@ -91,13 +91,139 @@ export function startDocFetch(config) {
       } catch (err) {
         fresh = null;
       }
+
+      // SSR 只内嵌一部分 block（大表格的单元格会走分页接口），这里按页补齐
+      async function fillRemaining(sourceCv, map, seq) {
+        let meta = {};
+        try {
+          meta = (window.DATA && window.DATA.meta) || {};
+        } catch (err) {
+          meta = {};
+        }
+        let token = meta.token || "";
+        try {
+          const wiki = window.current_space_wiki || {};
+          token = token || wiki.obj_token || "";
+        } catch (err) {
+          // ignore
+        }
+        if (!token && sourceCv) token = sourceCv.obj_token || "";
+        if (!token) return 0;
+
+        const startCursors = Array.isArray(sourceCv && sourceCv.next_cursors)
+          ? sourceCv.next_cursors.slice(0, 40)
+          : [];
+        // 所有模式共享请求预算，避免大文档拖慢导出
+        let budget = 30;
+
+        async function pull(mode, cursors) {
+          const queue = cursors.slice();
+          const seen = {};
+          let added = 0;
+          let emptyStreak = 0;
+          while (budget > 0) {
+            let cursor = "";
+            if (queue.length) {
+              cursor = queue.shift();
+              if (!cursor || seen[cursor]) continue;
+              seen[cursor] = 1;
+            }
+            budget -= 1;
+            let json = null;
+            try {
+              const url =
+                "/space/api/docx/pages/client_vars?id=" +
+                encodeURIComponent(token) +
+                "&mode=" +
+                encodeURIComponent(mode) +
+                "&limit=239" +
+                (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
+              const res = await fetch(url, {
+                credentials: "include",
+                headers: { Accept: "application/json, text/plain, */*" },
+              });
+              if (!res.ok) return added;
+              json = await res.json();
+            } catch (err) {
+              return added;
+            }
+            if (!json || json.code !== 0) return added;
+            const data = json.data || {};
+            const more = data.block_map || {};
+            const ids = Object.keys(more);
+            let fresh = 0;
+            for (let i = 0; i < ids.length; i += 1) {
+              const id = ids[i];
+              if (!map[id]) {
+                map[id] = more[id];
+                fresh += 1;
+              }
+            }
+            added += fresh;
+            const moreSeq = Array.isArray(data.block_sequence) ? data.block_sequence : [];
+            for (let i = 0; i < moreSeq.length; i += 1) {
+              if (seq.indexOf(moreSeq[i]) < 0) seq.push(moreSeq[i]);
+            }
+            const next = Array.isArray(data.next_cursors) ? data.next_cursors : [];
+            for (let i = 0; i < next.length; i += 1) queue.push(next[i]);
+            if (data.has_more && data.cursor) queue.push(data.cursor);
+            if (!queue.length) return added;
+            if (ids.length === 0) return added;
+            emptyStreak = fresh === 0 ? emptyStreak + 1 : 0;
+            if (emptyStreak >= 2) return added;
+          }
+          return added;
+        }
+
+        // 大表格单元格属于 skip block：先用 SSR 游标试 table_skip_block，
+        // 再试普通块，最后补折叠块
+        let added = await pull("table_skip_block", startCursors);
+        added += await pull("normal_block", startCursors);
+        if (added === 0) added += await pull("table_skip_block", []);
+        added += await pull("foldable_skip_block", []);
+        return added;
+      }
+
+      // 统计仍然缺失的表格单元格，用于提示导出是否完整
+      function countMissingCells(map) {
+        let missing = 0;
+        const ids = Object.keys(map);
+        for (let i = 0; i < ids.length; i += 1) {
+          const data = (map[ids[i]] && map[ids[i]].data) || {};
+          if (data.type !== "table") continue;
+          const cells = data.cell_set || {};
+          const keys = Object.keys(cells);
+          for (let j = 0; j < keys.length; j += 1) {
+            const cell = cells[keys[j]];
+            if (cell && cell.block_id && !map[cell.block_id]) missing += 1;
+          }
+        }
+        return missing;
+      }
+
       if (fresh) {
+        const map = fresh.blockMap;
+        const seq = fresh.blockSequence || Object.keys(map);
+        let incomplete = 0;
+        if (fresh.hasMore) {
+          try {
+            await fillRemaining(
+              { next_cursors: fresh.nextCursors || [], obj_token: fresh.objToken || "" },
+              map,
+              seq
+            );
+            incomplete = countMissingCells(map);
+          } catch (err) {
+            incomplete = 1;
+          }
+        }
         write({
           status: "done",
           source: "ssr",
           title: fresh.title || title,
-          blockMap: fresh.blockMap,
-          blockSequence: fresh.blockSequence,
+          blockMap: map,
+          blockSequence: seq,
+          incomplete: incomplete,
           pageUrl: String(location.href || ""),
         });
         return;
@@ -115,13 +241,23 @@ export function startDocFetch(config) {
         const map = cvData.block_map;
         const keys = Object.keys(map);
         if (keys.length > 0) {
-          const seq = Array.isArray(cvData.block_sequence) ? cvData.block_sequence : keys;
+          const seq = Array.isArray(cvData.block_sequence) ? cvData.block_sequence.slice() : keys;
+          let incomplete = 0;
+          if (cvData.has_more) {
+            try {
+              await fillRemaining(cvData, map, seq);
+              incomplete = countMissingCells(map);
+            } catch (err) {
+              incomplete = 1;
+            }
+          }
           write({
             status: "done",
             source: "ssr",
             title: title,
             blockMap: map,
             blockSequence: seq,
+            incomplete: incomplete,
             pageUrl: String(location.href || ""),
           });
           return;

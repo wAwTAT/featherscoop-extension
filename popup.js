@@ -643,7 +643,9 @@ async function exportDocument() {
 
     const imageNote =
       rendered.images.length > 0 ? " · 图片 " + imageOk + "/" + rendered.images.length : "";
-    setProgress(1, "文档已导出：" + docName + imageNote);
+    const partialNote =
+      payload.incomplete > 0 ? " · 但部分内容未能加载（" + payload.incomplete + " 个单元格）" : "";
+    setProgress(1, "文档已导出：" + docName + imageNote + partialNote);
     els.openFolderBtn.hidden = false;
   } catch (err) {
     setProgress(0, "导出失败：" + friendlyExportError(err));
@@ -655,7 +657,7 @@ async function exportDocument() {
 }
 
 async function waitForExport(tabId, tagId) {
-  const deadline = Date.now() + 45 * 1000;
+  const deadline = Date.now() + 90 * 1000;
   while (Date.now() < deadline) {
     await sleep(400);
     let raw = null;

@@ -200,6 +200,9 @@ export function refreshSsrInPage(config) {
         blockSequence: Array.isArray(clientVars.data.block_sequence)
           ? clientVars.data.block_sequence
           : keys,
+        hasMore: Boolean(clientVars.data.has_more),
+        nextCursors: Array.isArray(clientVars.data.next_cursors) ? clientVars.data.next_cursors : [],
+        objToken: String(meta.token || ""),
         ts: Date.now(),
       };
       try {
