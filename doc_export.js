@@ -116,6 +116,25 @@ export function startDocFetch(config) {
         // 所有模式共享请求预算，避免大文档拖慢导出
         let budget = 30;
 
+        // 页面自己加载过的分页数据（由 inject.js 在 MAIN world 拦截并缓存）
+        try {
+          const cache = window.__featherscoopBlockCache;
+          const slot = cache && cache.byToken && cache.byToken[token];
+          if (slot && slot.blockMap) {
+            const cached = Object.keys(slot.blockMap);
+            for (let i = 0; i < cached.length; i += 1) {
+              const id = cached[i];
+              if (!map[id]) map[id] = slot.blockMap[id];
+            }
+            const cachedSeq = slot.blockSequence || [];
+            for (let i = 0; i < cachedSeq.length; i += 1) {
+              if (seq.indexOf(cachedSeq[i]) < 0) seq.push(cachedSeq[i]);
+            }
+          }
+        } catch (err) {
+          // 没有缓存时忽略
+        }
+
         async function pull(mode, cursors) {
           const queue = cursors.slice();
           const seen = {};
