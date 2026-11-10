@@ -122,6 +122,7 @@ export function startDocFetch(config) {
         let budget = 30;
         let cachedAdded = 0;
         let apiState = "none";
+        let apiMsg = "";
 
         // 页面自己加载过的分页数据（由 inject.js 在 MAIN world 拦截并缓存）
         try {
@@ -198,6 +199,7 @@ export function startDocFetch(config) {
             }
             if (!json || json.code !== 0) {
               apiState = apiState === "none" ? "code-" + (json ? json.code : "bad") : apiState;
+              if (!apiMsg && json && json.msg) apiMsg = String(json.msg);
               return added;
             }
             if (apiState === "none") apiState = "ok";
@@ -269,6 +271,7 @@ export function startDocFetch(config) {
           }
           if (!json || json.code !== 0) {
             apiState = apiState === "none" ? "code-" + (json ? json.code : "bad") : apiState;
+            if (!apiMsg && json && json.msg) apiMsg = String(json.msg);
             return { added: 0, data: null };
           }
           if (apiState === "none") apiState = "ok";
@@ -392,6 +395,7 @@ export function startDocFetch(config) {
           replayed: replayed,
           synced: synced,
           api: apiState,
+          apiMsg: apiMsg,
           pageUrls: pageUrls.slice(0, 3),
         };
       }
@@ -468,27 +472,97 @@ export function startDocFetch(config) {
         return { tables: tables, cells: cells, incomplete: incomplete };
       }
 
-      // 最后兜底：分页数据既没取到也没拦截到时，从页面已渲染的表格 DOM 补全
-      function fillFromDom(map, overrides) {
-        let domTables = [];
+      // 大表格往往只渲染可视区域，滚动一遍把单元格文字收齐
+      async function collectDomTables() {
+        const sleep = function (ms) {
+          return new Promise(function (resolve) {
+            setTimeout(resolve, ms);
+          });
+        };
+
+        const nodes = [];
         try {
-          const nodes = document.querySelectorAll("table");
+          const list = document.querySelectorAll("table");
+          for (let i = 0; i < list.length; i += 1) nodes.push({ el: list[i], rows: [] });
+        } catch (err) {
+          return [];
+        }
+        if (!nodes.length) return [];
+
+        function snapshot() {
           for (let i = 0; i < nodes.length; i += 1) {
-            const trs = nodes[i].querySelectorAll("tr");
-            const rows = [];
-            for (let r = 0; r < trs.length; r += 1) {
-              const tds = trs[r].querySelectorAll("td,th");
-              const cells = [];
-              for (let c = 0; c < tds.length; c += 1) {
-                cells.push(cleanCellText(tds[c].innerText));
-              }
-              if (cells.length) rows.push(cells);
+            const node = nodes[i];
+            let trs = [];
+            try {
+              trs = node.el.querySelectorAll("tr");
+            } catch (err) {
+              trs = [];
             }
-            if (rows.length) domTables.push(rows);
+            if (!node.rows.length) {
+              for (let r = 0; r < trs.length; r += 1) node.rows.push([]);
+            }
+            for (let r = 0; r < trs.length && r < node.rows.length; r += 1) {
+              const tds = trs[r].querySelectorAll("td,th");
+              for (let c = 0; c < tds.length; c += 1) {
+                const text = cleanCellText(tds[c].innerText);
+                if (!text) continue;
+                if (!node.rows[r][c]) node.rows[r][c] = text;
+              }
+            }
+          }
+        }
+
+        snapshot();
+
+        let scroller = null;
+        try {
+          let cur = nodes[0].el.parentElement;
+          while (cur && cur !== document.body) {
+            const style = window.getComputedStyle(cur);
+            const overflow = style ? style.overflowY : "";
+            if (
+              cur.scrollHeight > cur.clientHeight + 40 &&
+              (overflow === "auto" || overflow === "scroll" || overflow === "overlay")
+            ) {
+              scroller = cur;
+              break;
+            }
+            cur = cur.parentElement;
           }
         } catch (err) {
-          domTables = [];
+          scroller = null;
         }
+        if (!scroller) scroller = document.scrollingElement || document.documentElement;
+
+        const saved = scroller.scrollTop;
+        let steps = 0;
+        try {
+          const step = Math.max(240, Math.floor((scroller.clientHeight || 600) * 0.8));
+          const max = scroller.scrollHeight || 0;
+          for (let y = 0; y <= max && steps < 40; y += step) {
+            scroller.scrollTop = y;
+            steps += 1;
+            await sleep(120);
+            snapshot();
+          }
+          scroller.scrollTop = saved;
+        } catch (err) {
+          try {
+            scroller.scrollTop = saved;
+          } catch (inner) {
+            // ignore
+          }
+        }
+
+        // 不要过滤空行，保持行号与表格 rows_id 一一对应
+        return nodes.map(function (node) {
+          return node.rows;
+        });
+      }
+
+      // 最后兜底：分页数据既没取到也没拦截到时，从页面已渲染的表格 DOM 补全
+      async function fillFromDom(map, overrides) {
+        const domTables = await collectDomTables();
         if (!domTables.length) return 0;
 
         const used = {};
@@ -508,6 +582,16 @@ export function startDocFetch(config) {
             if (domTables[t].length === rows.length && domTables[t][0].length === cols.length) {
               pick = t;
               break;
+            }
+          }
+          // 有些单元格被合并或首行为空，退一步按行数匹配
+          if (pick < 0) {
+            for (let t = 0; t < domTables.length; t += 1) {
+              if (used[t]) continue;
+              if (domTables[t].length === rows.length) {
+                pick = t;
+                break;
+              }
             }
           }
           if (pick < 0) continue;
@@ -557,7 +641,7 @@ export function startDocFetch(config) {
             diag = { cached: 0, paged: 0, api: "error" };
           }
           stats = tableStats(map, overrides);
-          const domFilled = fillFromDom(map, overrides);
+          const domFilled = await fillFromDom(map, overrides);
           if (diag) diag.dom = domFilled;
           stats = tableStats(map, overrides);
         }
