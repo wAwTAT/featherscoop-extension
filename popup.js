@@ -643,8 +643,15 @@ async function exportDocument() {
 
     const imageNote =
       rendered.images.length > 0 ? " · 图片 " + imageOk + "/" + rendered.images.length : "";
+    const diag = payload.diag || null;
+    const noSource =
+      diag && !diag.cached && !diag.paged
+        ? "，未捕获到页面分页数据" + (diag.api && diag.api !== "none" ? "（接口 " + diag.api + "）" : "")
+        : "";
     const partialNote =
-      payload.incomplete > 0 ? " · 但部分内容未能加载（" + payload.incomplete + " 个单元格）" : "";
+      payload.incomplete > 0
+        ? " · 但部分内容未能加载（" + payload.incomplete + " 个单元格" + noSource + "）"
+        : "";
     setProgress(1, "文档已导出：" + docName + imageNote + partialNote);
     els.openFolderBtn.hidden = false;
   } catch (err) {

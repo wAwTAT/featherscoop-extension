@@ -108,13 +108,15 @@ export function startDocFetch(config) {
           // ignore
         }
         if (!token && sourceCv) token = sourceCv.obj_token || "";
-        if (!token) return 0;
+        if (!token) return { cached: 0, paged: 0, api: "no-token" };
 
         const startCursors = Array.isArray(sourceCv && sourceCv.next_cursors)
           ? sourceCv.next_cursors.slice(0, 40)
           : [];
         // 所有模式共享请求预算，避免大文档拖慢导出
         let budget = 30;
+        let cachedAdded = 0;
+        let apiState = "none";
 
         // 页面自己加载过的分页数据（由 inject.js 在 MAIN world 拦截并缓存）
         try {
@@ -124,7 +126,10 @@ export function startDocFetch(config) {
             const cached = Object.keys(slot.blockMap);
             for (let i = 0; i < cached.length; i += 1) {
               const id = cached[i];
-              if (!map[id]) map[id] = slot.blockMap[id];
+              if (!map[id]) {
+                map[id] = slot.blockMap[id];
+                cachedAdded += 1;
+              }
             }
             const cachedSeq = slot.blockSequence || [];
             for (let i = 0; i < cachedSeq.length; i += 1) {
@@ -161,12 +166,20 @@ export function startDocFetch(config) {
                 credentials: "include",
                 headers: { Accept: "application/json, text/plain, */*" },
               });
-              if (!res.ok) return added;
+              if (!res.ok) {
+                apiState = apiState === "none" ? "http-" + res.status : apiState;
+                return added;
+              }
               json = await res.json();
             } catch (err) {
+              apiState = apiState === "none" ? "network" : apiState;
               return added;
             }
-            if (!json || json.code !== 0) return added;
+            if (!json || json.code !== 0) {
+              apiState = apiState === "none" ? "code-" + (json ? json.code : "bad") : apiState;
+              return added;
+            }
+            if (apiState === "none") apiState = "ok";
             const data = json.data || {};
             const more = data.block_map || {};
             const ids = Object.keys(more);
@@ -200,7 +213,7 @@ export function startDocFetch(config) {
         added += await pull("normal_block", startCursors);
         if (added === 0) added += await pull("table_skip_block", []);
         added += await pull("foldable_skip_block", []);
-        return added;
+        return { cached: cachedAdded, paged: added, api: apiState };
       }
 
       // 统计仍然缺失的表格单元格，用于提示导出是否完整
@@ -224,9 +237,10 @@ export function startDocFetch(config) {
         const map = fresh.blockMap;
         const seq = fresh.blockSequence || Object.keys(map);
         let incomplete = 0;
+        let diag = null;
         if (fresh.hasMore) {
           try {
-            await fillRemaining(
+            diag = await fillRemaining(
               { next_cursors: fresh.nextCursors || [], obj_token: fresh.objToken || "" },
               map,
               seq
@@ -243,6 +257,7 @@ export function startDocFetch(config) {
           blockMap: map,
           blockSequence: seq,
           incomplete: incomplete,
+          diag: diag,
           pageUrl: String(location.href || ""),
         });
         return;
@@ -262,9 +277,10 @@ export function startDocFetch(config) {
         if (keys.length > 0) {
           const seq = Array.isArray(cvData.block_sequence) ? cvData.block_sequence.slice() : keys;
           let incomplete = 0;
+          let diag = null;
           if (cvData.has_more) {
             try {
-              await fillRemaining(cvData, map, seq);
+              diag = await fillRemaining(cvData, map, seq);
               incomplete = countMissingCells(map);
             } catch (err) {
               incomplete = 1;
@@ -277,6 +293,7 @@ export function startDocFetch(config) {
             blockMap: map,
             blockSequence: seq,
             incomplete: incomplete,
+            diag: diag,
             pageUrl: String(location.href || ""),
           });
           return;
