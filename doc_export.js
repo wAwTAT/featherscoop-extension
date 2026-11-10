@@ -145,6 +145,22 @@ export function startDocFetch(config) {
           // 没有缓存时忽略
         }
 
+        // 复刻页面请求头，避免接口因缺少请求标识而拒绝
+        function apiHeaders() {
+          const headers = { Accept: "application/json, text/plain, */*" };
+          try {
+            const matched = String(document.cookie || "").match(/(?:^|;\s*)swp_csrf_token=([^;]*)/);
+            if (matched && matched[1]) headers["x-csrf-token"] = decodeURIComponent(matched[1]);
+          } catch (err) {
+            // ignore
+          }
+          const rid = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+          headers["Request-Id"] = rid;
+          headers["X-Request-Id"] = rid;
+          headers["X-TT-LOGID"] = "0" + rid;
+          return headers;
+        }
+
         async function pull(mode, cursors) {
           const queue = cursors.slice();
           const seen = {};
@@ -169,7 +185,7 @@ export function startDocFetch(config) {
                 (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
               const res = await fetch(url, {
                 credentials: "include",
-                headers: { Accept: "application/json, text/plain, */*" },
+                headers: apiHeaders(),
               });
               if (!res.ok) {
                 apiState = apiState === "none" ? "http-" + res.status : apiState;
@@ -240,7 +256,7 @@ export function startDocFetch(config) {
           try {
             const res = await fetch(url, {
               credentials: "include",
-              headers: { Accept: "application/json, text/plain, */*" },
+              headers: apiHeaders(),
             });
             if (!res.ok) {
               apiState = apiState === "none" ? "http-" + res.status : apiState;
@@ -317,7 +333,52 @@ export function startDocFetch(config) {
           }
         }
 
+        // 同步块里的内容（大表格常放在同步块）用 mode=4 单独拉取
+        function collectSyncedTargets() {
+          const out = [];
+          const ids = Object.keys(map);
+          for (let i = 0; i < ids.length; i += 1) {
+            const data = (map[ids[i]] && map[ids[i]].data) || {};
+            if (data.type !== "synced_reference") continue;
+            if (data.src_page_id && data.src_block_id) {
+              out.push({ page: data.src_page_id, block: data.src_block_id });
+            }
+          }
+          return out;
+        }
+
+        function syncedUrl(target) {
+          let url =
+            "/space/api/docx/pages/client_vars?id=" +
+            encodeURIComponent(target.page) +
+            "&mode=4&limit=239&block_id=" +
+            encodeURIComponent(target.block);
+          try {
+            const space = window.current_space_wiki || {};
+            if (space.space_id) url += "&wiki_space_id=" + encodeURIComponent(space.space_id);
+          } catch (err) {
+            // ignore
+          }
+          try {
+            const matched = String(location.pathname || "").match(/\/wiki\/([A-Za-z0-9]+)/);
+            if (matched) {
+              url += "&container_type=wiki2.0&container_id=" + encodeURIComponent(matched[1]);
+            }
+          } catch (err) {
+            // ignore
+          }
+          return url;
+        }
+
         // 页面没有可用请求记录时，退回按已知模式尝试
+        const syncedTargets = collectSyncedTargets();
+        let synced = 0;
+        for (let i = 0; i < syncedTargets.length && budget > 0; i += 1) {
+          const result = await fetchMerge(syncedUrl(syncedTargets[i]));
+          synced += 1;
+          paged += result.added;
+        }
+
         if (paged === 0) {
           paged += await pull("table_skip_block", startCursors);
           paged += await pull("normal_block", startCursors);
@@ -329,6 +390,7 @@ export function startDocFetch(config) {
           cached: cachedAdded,
           paged: paged,
           replayed: replayed,
+          synced: synced,
           api: apiState,
           pageUrls: pageUrls.slice(0, 3),
         };

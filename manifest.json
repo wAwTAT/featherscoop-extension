@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FeatherScoop — 飞书文档附件与正文下载器",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "一键保存飞书 / Lark 文档中的附件与正文（Markdown），复用浏览器登录态，无需 Cookie、Token 或命令行。",
   "minimum_chrome_version": "102",
   "icons": {
@@ -20,7 +20,7 @@
       "128": "icons/icon128.png"
     }
   },
-  "permissions": ["scripting", "downloads", "storage"],
+  "permissions": ["scripting", "downloads", "storage", "webNavigation"],
   "background": {
     "service_worker": "background.js"
   },
