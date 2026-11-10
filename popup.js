@@ -604,7 +604,11 @@ async function exportDocument() {
     const title = cleanTitle(payload.title) || state.title || "飞书文档";
     const root = sanitizeRootDir(els.rootDir.value || state.settings.rootDir);
     const docName = safeBaseName(title) + ".md";
-    const markdown = "# " + title + "\n\n" + rendered.markdown + "\n";
+    const tail = typeof payload.tail === "string" ? payload.tail.trim() : "";
+    const tailSection = tail
+      ? "\n\n---\n\n## 页面补充内容\n\n> 以下为表格之后从页面读取的正文，格式可能不完整。\n\n" + tail + "\n"
+      : "";
+    const markdown = "# " + title + "\n\n" + rendered.markdown + tailSection + "\n";
 
     // 先保存正文，再逐张下载图片；即使图片较多，用户也能马上拿到 Markdown
     setProgress(0.3, "正在保存 Markdown…");

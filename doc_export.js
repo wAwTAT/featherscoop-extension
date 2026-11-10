@@ -556,17 +556,51 @@ export function startDocFetch(config) {
 
         // 不要过滤空行，保持行号与表格 rows_id 一一对应
         return nodes.map(function (node) {
-          return node.rows;
+          return { rows: node.rows, el: node.el };
         });
+      }
+
+      // 抽取某个元素之后的兄弟节点文本，用于补全 SSR 截断的后续正文
+      function textAfterElement(startEl) {
+        const BLOCKED = { NAV: 1, ASIDE: 1, HEADER: 1, FOOTER: 1 };
+        const parts = [];
+        let cur = startEl;
+        let level = 0;
+        try {
+          while (cur && cur !== document.body && level < 6) {
+            let sib = cur.nextElementSibling;
+            while (sib) {
+              if (!BLOCKED[sib.tagName]) {
+                const text = String(sib.innerText || "")
+                  .replace(/[\u200b\u200c\u200d\ufeff]/g, "")
+                  .replace(/[ \t]+\n/g, "\n")
+                  .replace(/\n{3,}/g, "\n\n")
+                  .trim();
+                if (text) parts.push(text);
+              }
+              sib = sib.nextElementSibling;
+            }
+            cur = cur.parentElement;
+            level += 1;
+          }
+        } catch (err) {
+          // ignore
+        }
+        return parts.join("\n\n").trim().slice(0, 20000);
       }
 
       // 最后兜底：分页数据既没取到也没拦截到时，从页面已渲染的表格 DOM 补全
       async function fillFromDom(map, overrides) {
-        const domTables = await collectDomTables();
-        if (!domTables.length) return 0;
+        const items = await collectDomTables();
+        const domTables = items.map(function (item) {
+          return item.rows;
+        });
+        if (!domTables.length) return { filled: 0, tail: "" };
 
         const used = {};
         let filled = 0;
+        let tailEl = null;
+        let tailRows = 0;
         const ids = Object.keys(map);
         for (let i = 0; i < ids.length; i += 1) {
           const tableBlock = map[ids[i]];
@@ -598,6 +632,11 @@ export function startDocFetch(config) {
           used[pick] = 1;
 
           const dom = domTables[pick];
+          // 记住最大的表，用于读取它之后的正文
+          if (rows.length > tailRows) {
+            tailRows = rows.length;
+            tailEl = items[pick] && items[pick].el;
+          }
           const cellSet = data.cell_set || {};
           for (let r = 0; r < rows.length && r < dom.length; r += 1) {
             for (let c = 0; c < cols.length && c < dom[r].length; c += 1) {
@@ -611,7 +650,7 @@ export function startDocFetch(config) {
             }
           }
         }
-        return filled;
+        return { filled: filled, tail: tailEl ? textAfterElement(tailEl) : "" };
       }
 
       // 收集拦截器状态，便于排查取数失败的原因
@@ -628,10 +667,11 @@ export function startDocFetch(config) {
         return out;
       }
 
-      // 统一补全流程：分页数据 → DOM，返回 { incomplete, diag, overrides }
+      // 统一补全流程：分页数据 → DOM，返回 { incomplete, diag, overrides, tail }
       async function completeBlocks(map, seq, sourceCv) {
         const overrides = {};
         let diag = null;
+        let tail = "";
         let stats = tableStats(map, overrides);
         const needMore = Boolean(sourceCv && sourceCv.has_more) || stats.incomplete > 0;
         if (needMore) {
@@ -641,12 +681,21 @@ export function startDocFetch(config) {
             diag = { cached: 0, paged: 0, api: "error" };
           }
           stats = tableStats(map, overrides);
-          const domFilled = await fillFromDom(map, overrides);
-          if (diag) diag.dom = domFilled;
+          const domResult = await fillFromDom(map, overrides);
+          if (diag) {
+            diag.dom = domResult.filled;
+            diag.tail = domResult.tail ? domResult.tail.length : 0;
+          }
+          tail = domResult.tail;
           stats = tableStats(map, overrides);
         }
         if (diag) diag.stats = stats;
-        return { incomplete: stats.incomplete, diag: diag, overrides: overrides };
+        return {
+          incomplete: stats.incomplete,
+          diag: diag,
+          overrides: overrides,
+          tail: tail,
+        };
       }
 
       if (fresh) {
@@ -665,6 +714,7 @@ export function startDocFetch(config) {
           blockSequence: seq,
           overrides: done.overrides,
           incomplete: done.incomplete,
+          tail: done.tail,
           diag: withCacheDiag(done.diag),
           pageUrl: String(location.href || ""),
         });
@@ -693,6 +743,7 @@ export function startDocFetch(config) {
             blockSequence: seq,
             overrides: done.overrides,
             incomplete: done.incomplete,
+            tail: done.tail,
             diag: withCacheDiag(done.diag),
             pageUrl: String(location.href || ""),
           });
