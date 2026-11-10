@@ -2,6 +2,11 @@
 
 import { safeFileName } from "./shared.js";
 
+/** 去掉飞书编辑器的零宽占位字符 */
+function stripZeroWidth(input) {
+  return String(input == null ? "" : input).replace(/[\u200b\u200c\u200d\ufeff]/g, "");
+}
+
 /** 根据图片 MIME 推断本地扩展名 */
 function imageExt(mimeType) {
   const mime = String(mimeType || "").toLowerCase();
@@ -207,13 +212,134 @@ export function startDocFetch(config) {
           return added;
         }
 
-        // 大表格单元格属于 skip block：先用 SSR 游标试 table_skip_block，
-        // 再试普通块，最后补折叠块
-        let added = await pull("table_skip_block", startCursors);
-        added += await pull("normal_block", startCursors);
-        if (added === 0) added += await pull("table_skip_block", []);
-        added += await pull("foldable_skip_block", []);
-        return { cached: cachedAdded, paged: added, api: apiState };
+        // 读取页面实际请求过的文档数据地址（含真实参数），按原样重放
+        function collectPageUrls() {
+          const out = [];
+          const seen = {};
+          try {
+            const entries = performance.getEntriesByType("resource") || [];
+            for (let i = 0; i < entries.length; i += 1) {
+              const name = String((entries[i] && entries[i].name) || "");
+              if (!name) continue;
+              if (name.indexOf("/docx/") < 0 && name.indexOf("/api/docx") < 0) continue;
+              if (!/client_vars|blocks|block_list|content/.test(name)) continue;
+              if (seen[name]) continue;
+              seen[name] = 1;
+              out.push(name);
+              if (out.length >= 40) break;
+            }
+          } catch (err) {
+            // ignore
+          }
+          return out;
+        }
+
+        async function fetchMerge(url) {
+          budget -= 1;
+          let json = null;
+          try {
+            const res = await fetch(url, {
+              credentials: "include",
+              headers: { Accept: "application/json, text/plain, */*" },
+            });
+            if (!res.ok) {
+              apiState = apiState === "none" ? "http-" + res.status : apiState;
+              return { added: 0, data: null };
+            }
+            json = await res.json();
+          } catch (err) {
+            apiState = apiState === "none" ? "network" : apiState;
+            return { added: 0, data: null };
+          }
+          if (!json || json.code !== 0) {
+            apiState = apiState === "none" ? "code-" + (json ? json.code : "bad") : apiState;
+            return { added: 0, data: null };
+          }
+          if (apiState === "none") apiState = "ok";
+          const data = json.data || {};
+          const more = data.block_map || {};
+          let added = 0;
+          const ids = Object.keys(more);
+          for (let i = 0; i < ids.length; i += 1) {
+            const id = ids[i];
+            if (!map[id]) {
+              map[id] = more[id];
+              added += 1;
+            }
+          }
+          const moreSeq = Array.isArray(data.block_sequence) ? data.block_sequence : [];
+          for (let i = 0; i < moreSeq.length; i += 1) {
+            if (seq.indexOf(moreSeq[i]) < 0) seq.push(moreSeq[i]);
+          }
+          return { added: added, data: data };
+        }
+
+        const pageUrls = collectPageUrls();
+        let paged = 0;
+        let replayed = 0;
+        let template = "";
+        let cursors = [];
+
+        for (let i = 0; i < pageUrls.length && budget > 0; i += 1) {
+          const result = await fetchMerge(pageUrls[i]);
+          replayed += 1;
+          template = pageUrls[i];
+          paged += result.added;
+          const data = result.data || {};
+          const next = Array.isArray(data.next_cursors) ? data.next_cursors : [];
+          cursors = cursors.concat(next);
+          if (data.has_more && data.cursor) cursors.push(data.cursor);
+        }
+
+        // 用页面自己的地址作为模板继续翻页，避免猜错参数
+        if (template) {
+          const seenCursor = {};
+          let tries = 0;
+          while (cursors.length && budget > 0 && tries < 30) {
+            const cursor = cursors.shift();
+            if (!cursor || seenCursor[cursor]) continue;
+            seenCursor[cursor] = 1;
+            tries += 1;
+            let url = "";
+            try {
+              const u = new URL(template, location.href);
+              u.searchParams.set("cursor", cursor);
+              url = u.href;
+            } catch (err) {
+              break;
+            }
+            const result = await fetchMerge(url);
+            paged += result.added;
+            const data = result.data || {};
+            const next = Array.isArray(data.next_cursors) ? data.next_cursors : [];
+            cursors = cursors.concat(next);
+            if (data.has_more && data.cursor) cursors.push(data.cursor);
+          }
+        }
+
+        // 页面没有可用请求记录时，退回按已知模式尝试
+        if (paged === 0) {
+          paged += await pull("table_skip_block", startCursors);
+          paged += await pull("normal_block", startCursors);
+          if (paged === 0) paged += await pull("table_skip_block", []);
+          paged += await pull("foldable_skip_block", []);
+        }
+
+        return {
+          cached: cachedAdded,
+          paged: paged,
+          replayed: replayed,
+          api: apiState,
+          pageUrls: pageUrls.slice(0, 3),
+        };
+      }
+
+      // 飞书编辑器用零宽空格占位，导出前清掉
+      function cleanCellText(input) {
+        return String(input == null ? "" : input)
+          .replace(/[\u200b\u200c\u200d\ufeff]/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
       }
 
       // 读取单元格文本；block 或文字缺失都算不完整
@@ -241,7 +367,7 @@ export function startDocFetch(config) {
             }
           }
         }
-        return out.trim();
+        return cleanCellText(out);
       }
 
       // 统计表格单元格的结构完整性：单元格 block 或它的子块缺失才算不完整
@@ -292,7 +418,7 @@ export function startDocFetch(config) {
               const tds = trs[r].querySelectorAll("td,th");
               const cells = [];
               for (let c = 0; c < tds.length; c += 1) {
-                cells.push(String(tds[c].innerText || "").replace(/\s+/g, " ").trim());
+                cells.push(cleanCellText(tds[c].innerText));
               }
               if (cells.length) rows.push(cells);
             }
@@ -694,7 +820,7 @@ export function renderSsrBlocksToMarkdown(payload, options) {
     const holder = data && data.text && data.text.initialAttributedTexts;
     if (!holder) return "";
     const segments = holder.text;
-    if (typeof segments === "string") return segments;
+    if (typeof segments === "string") return stripZeroWidth(segments);
     if (!segments || typeof segments !== "object") return "";
     const keys = Object.keys(segments).sort(function (a, b) {
       return Number(a) - Number(b);
@@ -704,7 +830,7 @@ export function renderSsrBlocksToMarkdown(payload, options) {
       const value = segments[key];
       if (value != null) out += String(value);
     }
-    return out;
+    return stripZeroWidth(out);
   }
 
   function renderTable(data) {
