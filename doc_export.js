@@ -233,6 +233,93 @@ export function startDocFetch(config) {
         return missing;
       }
 
+      // 最后兜底：分页数据既没取到也没拦截到时，从页面已渲染的表格 DOM 补全
+      function fillFromDom(map) {
+        let domTables = [];
+        try {
+          const nodes = document.querySelectorAll("table");
+          for (let i = 0; i < nodes.length; i += 1) {
+            const trs = nodes[i].querySelectorAll("tr");
+            const rows = [];
+            for (let r = 0; r < trs.length; r += 1) {
+              const tds = trs[r].querySelectorAll("td,th");
+              const cells = [];
+              for (let c = 0; c < tds.length; c += 1) {
+                cells.push(String(tds[c].innerText || "").replace(/\s+/g, " ").trim());
+              }
+              if (cells.length) rows.push(cells);
+            }
+            if (rows.length) domTables.push(rows);
+          }
+        } catch (err) {
+          domTables = [];
+        }
+        if (!domTables.length) return 0;
+
+        const used = {};
+        let filled = 0;
+        const ids = Object.keys(map);
+        for (let i = 0; i < ids.length; i += 1) {
+          const tableBlock = map[ids[i]];
+          const data = (tableBlock && tableBlock.data) || {};
+          if (data.type !== "table") continue;
+          const rows = data.rows_id || [];
+          const cols = data.columns_id || [];
+          if (!rows.length || !cols.length) continue;
+
+          let pick = -1;
+          for (let t = 0; t < domTables.length; t += 1) {
+            if (used[t]) continue;
+            if (domTables[t].length === rows.length && domTables[t][0].length === cols.length) {
+              pick = t;
+              break;
+            }
+          }
+          if (pick < 0) continue;
+          used[pick] = 1;
+
+          const dom = domTables[pick];
+          const cellSet = data.cell_set || {};
+          for (let r = 0; r < rows.length && r < dom.length; r += 1) {
+            for (let c = 0; c < cols.length && c < dom[r].length; c += 1) {
+              const cell = cellSet[rows[r] + cols[c]];
+              if (!cell || !cell.block_id || map[cell.block_id]) continue;
+              const text = dom[r][c];
+              if (!text) continue;
+              const textId = "dom_" + cell.block_id;
+              map[cell.block_id] = {
+                id: cell.block_id,
+                data: { type: "table_cell", parent_id: ids[i], children: [textId] },
+              };
+              map[textId] = {
+                id: textId,
+                data: {
+                  type: "text",
+                  parent_id: cell.block_id,
+                  text: { initialAttributedTexts: { text: { 0: text } } },
+                },
+              };
+              filled += 1;
+            }
+          }
+        }
+        return filled;
+      }
+
+      // 收集拦截器状态，便于排查取数失败的原因
+      function withCacheDiag(diag) {
+        const out = diag || {};
+        try {
+          const cache = window.__featherscoopBlockCache;
+          out.injected = Boolean(cache && cache.injectedAt);
+          out.urls = cache && Array.isArray(cache.urls) ? cache.urls.slice(0, 5) : [];
+        } catch (err) {
+          out.injected = false;
+          out.urls = [];
+        }
+        return out;
+      }
+
       if (fresh) {
         const map = fresh.blockMap;
         const seq = fresh.blockSequence || Object.keys(map);
@@ -246,6 +333,11 @@ export function startDocFetch(config) {
               seq
             );
             incomplete = countMissingCells(map);
+            if (incomplete > 0) {
+              const domFilled = fillFromDom(map);
+              diag.dom = domFilled;
+              incomplete = countMissingCells(map);
+            }
           } catch (err) {
             incomplete = 1;
           }
@@ -257,7 +349,7 @@ export function startDocFetch(config) {
           blockMap: map,
           blockSequence: seq,
           incomplete: incomplete,
-          diag: diag,
+          diag: withCacheDiag(diag),
           pageUrl: String(location.href || ""),
         });
         return;
@@ -282,6 +374,11 @@ export function startDocFetch(config) {
             try {
               diag = await fillRemaining(cvData, map, seq);
               incomplete = countMissingCells(map);
+              if (incomplete > 0) {
+                const domFilled = fillFromDom(map);
+                diag.dom = domFilled;
+                incomplete = countMissingCells(map);
+              }
             } catch (err) {
               incomplete = 1;
             }
@@ -293,7 +390,7 @@ export function startDocFetch(config) {
             blockMap: map,
             blockSequence: seq,
             incomplete: incomplete,
-            diag: diag,
+            diag: withCacheDiag(diag),
             pageUrl: String(location.href || ""),
           });
           return;

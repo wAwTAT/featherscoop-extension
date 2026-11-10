@@ -652,6 +652,29 @@ async function exportDocument() {
       payload.incomplete > 0
         ? " · 但部分内容未能加载（" + payload.incomplete + " 个单元格" + noSource + "）"
         : "";
+
+    // 内容不完整时导出诊断信息，便于定位
+    if (payload.incomplete > 0) {
+      const debug = {
+        pageUrl: state.pageUrl,
+        title: title,
+        incomplete: payload.incomplete,
+        blockCount: payload.blockMap ? Object.keys(payload.blockMap).length : 0,
+        diag: payload.diag || null,
+        exportedAt: new Date().toISOString(),
+        version: chrome.runtime.getManifest().version,
+      };
+      try {
+        await chrome.downloads.download({
+          url: buildDataUrl(JSON.stringify(debug, null, 2)),
+          filename: root + "/_featherscoop_debug.json",
+          conflictAction: "overwrite",
+          saveAs: false,
+        });
+      } catch (err) {
+        // 诊断文件失败不影响导出
+      }
+    }
     setProgress(1, "文档已导出：" + docName + imageNote + partialNote);
     els.openFolderBtn.hidden = false;
   } catch (err) {

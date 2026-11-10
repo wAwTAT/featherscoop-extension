@@ -4,10 +4,20 @@
   const CACHE_KEY = "__featherscoopBlockCache";
   if (window[CACHE_KEY]) return;
 
-  const cache = { byToken: {} };
+  const cache = { byToken: {}, urls: [], injectedAt: Date.now() };
   window[CACHE_KEY] = cache;
 
   const PATTERN = "/docx/pages/client_vars";
+
+  function logUrl(url) {
+    try {
+      if (!url || cache.urls.length >= 40) return;
+      if (String(url).indexOf("client_vars") < 0 && String(url).indexOf("/docx/") < 0) return;
+      if (cache.urls.indexOf(String(url)) < 0) cache.urls.push(String(url));
+    } catch (err) {
+      // ignore
+    }
+  }
 
   function remember(url, json) {
     try {
@@ -43,6 +53,7 @@
     window.fetch = function (input, init) {
       const url =
         typeof input === "string" ? input : (input && input.url) || String(input || "");
+      logUrl(url);
       const promise = originalFetch.apply(this, arguments);
       if (url && url.indexOf(PATTERN) >= 0) {
         try {
@@ -76,6 +87,7 @@
     XHR.prototype.open = function (method, url) {
       try {
         this.__featherscoopUrl = url;
+        logUrl(url);
       } catch (err) {
         // ignore
       }
